@@ -1,0 +1,28 @@
+name: Post gold price to Telegram
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # هر ۳۰ دقیقه، ۲۴ ساعته - حتی وقتی سیستم خودت خاموشه
+  workflow_dispatch: {}       # اجازه‌ی اجرای دستی از تب Actions، برای تست
+
+jobs:
+  post-price:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the bot
+        env:
+          GOLD_API_KEY: ${{ secrets.GOLD_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: python project.py
