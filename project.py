@@ -14,6 +14,10 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 GOLD_API_URL = "https://www.goldapi.io/api/XAU/USD"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
+# اگه درصد تغییرِ روزانه‌ی هر کدوم از قیمت‌ها (طلا، تتر، سکه) از این مقدار
+# بیشتر بشه، یک هشدار نوسان بالای پیام اضافه می‌شه.
+SIGNIFICANT_CHANGE_THRESHOLD = 2.0
+
 
 def main():
     """
@@ -37,18 +41,31 @@ def main():
         data = get_gold_price(gold_api_key)
         price_info = parse_price(data)
 
-        # گرفتن قیمت تتر عمداً "بهترین تلاش" (best-effort) است: اگه کلید نداریم یا
-        # brsapi.ir قطع/در حال آپدیت بود، فقط از این بخش رد می‌شیم و پیام طلا رو
-        # بدون خط تتر می‌فرستیم - یک مشکل جانبی نباید کل پست رو متوقف کنه.
+        # گرفتن قیمت‌های ایرانی عمداً "بهترین تلاش" (best-effort) است: اگه کلید
+        # نداریم یا brsapi.ir قطع/در حال آپدیت بود، فقط از این بخش رد می‌شیم و
+        # پیام طلا رو بدون این خط‌ها می‌فرستیم - یک مشکل جانبی نباید کل پست رو
+        # متوقف کنه. تتر و سکه هم مستقل از هم پردازش می‌شن: اگه یکی‌شون توی
+        # پاسخ brsapi.ir پیدا نشه (مثلاً ValueError)، اون‌یکی همچنان کار می‌کنه.
         tether_info = None
+        coin_info = None
         if brsapi_key:
             try:
                 iran_data = get_iran_prices(brsapi_key)
-                tether_info = parse_tether_price(iran_data)
             except Exception as e:
-                print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Tether price unavailable: {e}")
+                iran_data = None
+                print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: brsapi.ir unavailable: {e}")
 
-        message = format_message(price_info, tether_info)
+            if iran_data is not None:
+                try:
+                    tether_info = parse_tether_price(iran_data)
+                except Exception as e:
+                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Tether price unavailable: {e}")
+                try:
+                    coin_info = parse_gold_coin_price(iran_data)
+                except Exception as e:
+                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Coin price unavailable: {e}")
+
+        message = format_message(price_info, tether_info, coin_info)
         payload = build_telegram_payload(channel_id, message)
         send_telegram_message(bot_token, payload)
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Sent: {message!r}")
@@ -124,6 +141,36 @@ def parse_tether_price(data):
     raise ValueError("USDT_IRT not found in brsapi.ir response")
 
 
+def parse_gold_coin_price(data):
+    """
+    قیمت سکه امامی رو از پاسخ brsapi.ir استخراج می‌کنه؛ داخل لیست data["gold"]
+    دنبال آیتمی می‌گرده که کلمه‌ی "امامی" توی فیلد name اش باشه.
+
+    نکته: brsapi.ir برخلاف currency (که symbol ثابت USDT_IRT داره)، مستندات
+    رسمی‌ای برای symbol دقیق سکه امامی منتشر نکرده؛ به همین خاطر عمداً بر پایه‌ی
+    نام فارسی (که در توضیحات API دیده شده) جستجو می‌کنه - این روش نسبت به تغییر
+    احتمالی symbol مقاوم‌تره. اگه پیدا نشه (مثلاً fallback به None به‌جای raise)
+    None برمی‌گردونه، دقیقاً مثل رفتار best-effort تتر توی main().
+
+    این تابع خالص (pure) است: هیچ درخواست شبکه‌ای نمی‌زنه.
+    """
+    for item in data.get("gold", []):
+        if "امامی" in item.get("name", ""):
+            return {
+                "toman": item["price"],
+                "change_percent": item.get("change_percent", 0),
+            }
+    return None
+
+
+def is_significant_change(change_percent, threshold=SIGNIFICANT_CHANGE_THRESHOLD):
+    """
+    آیا اندازه‌ی (قدرمطلق) درصد تغییر از آستانه‌ی مشخص‌شده بیشتره؟
+    این تابع خالص (pure) است.
+    """
+    return abs(change_percent) >= threshold
+
+
 def calculate_18k_gold_toman(gram_24k_usd, tether_toman):
     """
     قیمت هر گرم طلای ۱۸ عیار رو به تومان حساب می‌کنه؛ از قیمت گرم ۲۴ عیار (دلار،
@@ -138,16 +185,28 @@ def calculate_18k_gold_toman(gram_24k_usd, tether_toman):
     return gram_18k_toman
 
 
-def format_message(price_info, tether_info=None):
+def format_message(price_info, tether_info=None, coin_info=None):
     """
     یک پیام فارسیِ خوانا برای تلگرام از روی اطلاعات قیمت می‌سازه (تابع خالص، قابل تست).
-    tether_info اختیاریه: اگه داده بشه، یک بخش اضافه برای قیمت تتر هم به پیام اضافه می‌شه.
+    tether_info و coin_info اختیاری‌ان: هر کدوم داده بشن، یک بخش اضافه برای اون
+    قیمت به پیام اضافه می‌شه. اگه تغییر روزانه‌ی هر کدوم از قیمت‌ها از
+    SIGNIFICANT_CHANGE_THRESHOLD بیشتر باشه، یک بنر هشدار بالای پیام اضافه می‌شه.
     """
     arrow = "🔺" if price_info["change_percent"] >= 0 else "🔻"
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    lines = [
-        "<b>🥇 قیمت لحظه‌ای طلای جهانی</b>",
+    alerts = []
+    if is_significant_change(price_info["change_percent"]):
+        alerts.append("طلای جهانی")
+    if tether_info is not None and is_significant_change(tether_info["change_percent"]):
+        alerts.append("تتر")
+    if coin_info is not None and is_significant_change(coin_info["change_percent"]):
+        alerts.append("سکه امامی")
+
+    lines = ["<b>🥇 قیمت لحظه‌ای طلای جهانی</b>"]
+    if alerts:
+        lines.append(f"⚠️ نوسان قابل‌توجه: {'، '.join(alerts)}")
+    lines += [
         "",
         f"هر اونس: {price_info['ounce_usd']:.2f} دلار",
         f"هر گرم (۲۴ عیار): {price_info['gram_24k_usd']:.2f} دلار",
@@ -163,6 +222,14 @@ def format_message(price_info, tether_info=None):
             f"تغییر: {tether_arrow} {abs(tether_info['change_percent']):.2f}%",
             "",
             f"🥇 طلای ۱۸ عیار: {gold_18k_toman:,.0f} تومان",
+        ]
+
+    if coin_info is not None:
+        coin_arrow = "🔺" if coin_info["change_percent"] >= 0 else "🔻"
+        lines += [
+            "",
+            f"🟡 سکه امامی: {coin_info['toman']:,} تومان",
+            f"تغییر: {coin_arrow} {abs(coin_info['change_percent']):.2f}%",
         ]
 
     lines += ["", f"🕒 بروزرسانی: {now}"]
