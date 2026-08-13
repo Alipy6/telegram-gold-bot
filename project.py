@@ -124,6 +124,20 @@ def parse_tether_price(data):
     raise ValueError("USDT_IRT not found in brsapi.ir response")
 
 
+def calculate_18k_gold_toman(gram_24k_usd, tether_toman):
+    """
+    قیمت هر گرم طلای ۱۸ عیار رو به تومان حساب می‌کنه؛ از قیمت گرم ۲۴ عیار (دلار،
+    که خودِ GoldAPI.io مستقیم می‌ده) و نرخ تتر به تومان استفاده می‌کنه.
+    این تابع خالص (pure) است: هیچ درخواست شبکه‌ای نمی‌زنه، فقط دو عدد رو پردازش می‌کنه.
+
+    نکته: این معادل «جهانی» قیمت ۱۸ عیاره، نه لزوماً قیمت دقیق بازار طلافروشی
+    ایران (که معمولاً اجرت، سود و مالیات هم روش اضافه می‌شه).
+    """
+    gram_24k_toman = gram_24k_usd * tether_toman
+    gram_18k_toman = gram_24k_toman * 0.75
+    return gram_18k_toman
+
+
 def format_message(price_info, tether_info=None):
     """
     یک پیام فارسیِ خوانا برای تلگرام از روی اطلاعات قیمت می‌سازه (تابع خالص، قابل تست).
@@ -142,10 +156,13 @@ def format_message(price_info, tether_info=None):
 
     if tether_info is not None:
         tether_arrow = "🔺" if tether_info["change_percent"] >= 0 else "🔻"
+        gold_18k_toman = calculate_18k_gold_toman(price_info["gram_24k_usd"], tether_info["toman"])
         lines += [
             "",
             f"💵 تتر (USDT): {tether_info['toman']:,} تومان",
             f"تغییر: {tether_arrow} {abs(tether_info['change_percent']):.2f}%",
+            "",
+            f"🥇 طلای ۱۸ عیار: {gold_18k_toman:,.0f} تومان",
         ]
 
     lines += ["", f"🕒 بروزرسانی: {now}"]
