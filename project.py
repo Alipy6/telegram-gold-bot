@@ -89,10 +89,20 @@ def get_iran_prices(api_key):
     """
     قیمت‌های داخلی (طلا، ارز، رمزارز به تومن) رو از brsapi.ir می‌گیره.
     خروجی: دیکشنری خام JSON با سه کلید gold/currency/cryptocurrency.
+
+    نکته: brsapi.ir درخواست‌هایی با User-Agent پیش‌فرض کتابخونه‌های پایتون/Go رو
+    خودکار مسدود می‌کنه (حتی تا ۲ ساعت مسدودی IP)، پس عمداً یک User-Agent شبیه
+    مرورگر واقعی می‌فرستیم تا این اتفاق نیفته.
     """
     response = requests.get(
         "https://Api.BrsApi.ir/Market/Gold_Currency.php",
         params={"key": api_key},
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        },
         timeout=10,
     )
     response.raise_for_status()
