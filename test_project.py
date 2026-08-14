@@ -14,12 +14,15 @@ from project import (
 # ---------- parse_price ----------
 
 def test_parse_price():
-    data = {"price": 2650.4, "price_gram_24k": 85.2, "chp": -0.58, "extra_field": "ignored"}
-    assert parse_price(data) == {
-        "ounce_usd": 2650.4,
-        "gram_24k_usd": 85.2,
-        "change_percent": -0.58,
+    data = {
+        "currency": "USD",
+        "price": 4165.200195,
+        "symbol": "XAU",
+        "updatedAt": "2026-08-14T10:00:00Z",
     }
+    result = parse_price(data)
+    assert result["ounce_usd"] == 4165.200195
+    assert result["gram_24k_usd"] == pytest.approx(133.914, abs=0.01)
 
 
 # ---------- parse_tether_price ----------
@@ -92,16 +95,16 @@ def test_is_significant_change_custom_threshold():
 # ---------- format_message ----------
 
 def test_format_message_gold_only():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.5}
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
     message = format_message(price_info)
     assert "هر اونس: 2650.40 دلار" in message
     assert "تتر" not in message
     assert "سکه امامی" not in message
-    assert "⚠️" not in message  # تغییر ۰.۵٪ کمتر از آستانه‌ست
+    assert "⚠️" not in message
 
 
 def test_format_message_with_tether_includes_18k_line():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.5}
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
     tether_info = {"toman": 95000, "change_percent": 0.3}
     message = format_message(price_info, tether_info)
     assert "تتر (USDT): 95,000 تومان" in message
@@ -110,20 +113,14 @@ def test_format_message_with_tether_includes_18k_line():
 
 
 def test_format_message_with_coin():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.5}
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
     coin_info = {"toman": 45000000, "change_percent": 1.0}
     message = format_message(price_info, coin_info=coin_info)
     assert "سکه امامی: 45,000,000 تومان" in message
 
 
-def test_format_message_significant_change_shows_alert():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 3.2}
-    message = format_message(price_info)
-    assert "⚠️ نوسان قابل‌توجه: طلای جهانی" in message
-
-
 def test_format_message_significant_tether_change_shows_alert():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.1}
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
     tether_info = {"toman": 95000, "change_percent": -2.4}
     message = format_message(price_info, tether_info)
     assert "⚠️ نوسان قابل‌توجه: تتر" in message
