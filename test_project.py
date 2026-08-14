@@ -1,33 +1,20 @@
-from project import build_telegram_payload, format_message, parse_price, parse_tether_price
+import pytest
 
-# نمونه‌ی واقعی (خلاصه‌شده) از پاسخ brsapi.ir که برای ساخت این تست‌ها استفاده شده
-BRSAPI_SAMPLE = {
-    "currency": [
-        {
-            "symbol": "USDT_IRT",
-            "name": "دلار تتر",
-            "price": 81983,
-            "change_percent": -1.02,
-            "unit": "تومان",
-        },
-        {
-            "symbol": "USD",
-            "name": "دلار",
-            "price": 81650,
-            "change_percent": -0.91,
-            "unit": "تومان",
-        },
-    ]
-}
+from project import (
+    build_telegram_payload,
+    calculate_18k_gold_toman,
+    format_message,
+    is_significant_change,
+    parse_gold_coin_price,
+    parse_price,
+    parse_tether_price,
+)
 
+
+# ---------- parse_price ----------
 
 def test_parse_price():
-    data = {
-        "price": 2650.4,
-        "price_gram_24k": 85.2,
-        "chp": -0.58,
-        "some_other_field": "ignored",
-    }
+    data = {"price": 2650.4, "price_gram_24k": 85.2, "chp": -0.58, "extra_field": "ignored"}
     assert parse_price(data) == {
         "ounce_usd": 2650.4,
         "gram_24k_usd": 85.2,
@@ -35,21 +22,114 @@ def test_parse_price():
     }
 
 
-def test_format_message_negative_change():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": -0.58}
+# ---------- parse_tether_price ----------
+
+def test_parse_tether_price_found():
+    data = {
+        "currency": [
+            {"symbol": "USD_IRT", "price": 91000, "change_percent": 0.1},
+            {"symbol": "USDT_IRT", "price": 95000, "change_percent": 0.3},
+        ]
+    }
+    assert parse_tether_price(data) == {"toman": 95000, "change_percent": 0.3}
+
+
+def test_parse_tether_price_not_found_raises():
+    data = {"currency": [{"symbol": "USD_IRT", "price": 91000, "change_percent": 0.1}]}
+    with pytest.raises(ValueError):
+        parse_tether_price(data)
+
+
+# ---------- parse_gold_coin_price ----------
+
+def test_parse_gold_coin_price_found():
+    data = {
+        "gold": [
+            {"name": "طلای 18 عیار", "price": 5000000, "change_percent": 0.4},
+            {"name": "سکه امامی", "price": 45000000, "change_percent": 1.2},
+        ]
+    }
+    assert parse_gold_coin_price(data) == {"toman": 45000000, "change_percent": 1.2}
+
+
+def test_parse_gold_coin_price_not_found_returns_none():
+    data = {"gold": [{"name": "طلای 18 عیار", "price": 5000000, "change_percent": 0.4}]}
+    assert parse_gold_coin_price(data) is None
+
+
+def test_parse_gold_coin_price_missing_key_returns_none():
+    # اگه اصلاً کلید "gold" توی پاسخ نباشه، نباید کرش کنه
+    assert parse_gold_coin_price({}) is None
+
+
+# ---------- calculate_18k_gold_toman ----------
+
+def test_calculate_18k_gold_toman():
+    assert calculate_18k_gold_toman(85.2, 95000) == pytest.approx(6070500.0)
+
+
+def test_calculate_18k_gold_toman_zero_rate():
+    assert calculate_18k_gold_toman(85.2, 0) == 0
+
+
+# ---------- is_significant_change ----------
+
+def test_is_significant_change_above_threshold():
+    assert is_significant_change(2.5) is True
+    assert is_significant_change(-3.0) is True  # قدرمطلق، پس منفی هم حساب می‌شه
+
+
+def test_is_significant_change_below_threshold():
+    assert is_significant_change(1.0) is False
+    assert is_significant_change(-1.9) is False
+
+
+def test_is_significant_change_custom_threshold():
+    assert is_significant_change(4.0, threshold=5.0) is False
+    assert is_significant_change(6.0, threshold=5.0) is True
+
+
+# ---------- format_message ----------
+
+def test_format_message_gold_only():
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.5}
     message = format_message(price_info)
-    assert "2650.40" in message
-    assert "85.20" in message
-    assert "🔻" in message
-    assert "0.58%" in message
+    assert "هر اونس: 2650.40 دلار" in message
+    assert "تتر" not in message
+    assert "سکه امامی" not in message
+    assert "⚠️" not in message  # تغییر ۰.۵٪ کمتر از آستانه‌ست
 
 
-def test_format_message_positive_change():
-    price_info = {"ounce_usd": 2700.0, "gram_24k_usd": 86.8, "change_percent": 1.2}
+def test_format_message_with_tether_includes_18k_line():
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.5}
+    tether_info = {"toman": 95000, "change_percent": 0.3}
+    message = format_message(price_info, tether_info)
+    assert "تتر (USDT): 95,000 تومان" in message
+    assert "طلای ۱۸ عیار" in message
+    assert "سکه امامی" not in message
+
+
+def test_format_message_with_coin():
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.5}
+    coin_info = {"toman": 45000000, "change_percent": 1.0}
+    message = format_message(price_info, coin_info=coin_info)
+    assert "سکه امامی: 45,000,000 تومان" in message
+
+
+def test_format_message_significant_change_shows_alert():
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 3.2}
     message = format_message(price_info)
-    assert "🔺" in message
-    assert "1.20%" in message
+    assert "⚠️ نوسان قابل‌توجه: طلای جهانی" in message
 
+
+def test_format_message_significant_tether_change_shows_alert():
+    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": 0.1}
+    tether_info = {"toman": 95000, "change_percent": -2.4}
+    message = format_message(price_info, tether_info)
+    assert "⚠️ نوسان قابل‌توجه: تتر" in message
+
+
+# ---------- build_telegram_payload ----------
 
 def test_build_telegram_payload():
     payload = build_telegram_payload("@my_channel", "hello")
@@ -58,25 +138,3 @@ def test_build_telegram_payload():
         "text": "hello",
         "parse_mode": "HTML",
     }
-
-
-def test_parse_tether_price():
-    assert parse_tether_price(BRSAPI_SAMPLE) == {
-        "toman": 81983,
-        "change_percent": -1.02,
-    }
-
-
-def test_format_message_includes_tether_when_given():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": -0.58}
-    tether_info = {"toman": 81983, "change_percent": -1.02}
-    message = format_message(price_info, tether_info)
-    assert "تتر" in message
-    assert "81,983" in message
-    assert "🔻" in message
-
-
-def test_format_message_omits_tether_when_not_given():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2, "change_percent": -0.58}
-    message = format_message(price_info)
-    assert "تتر" not in message
