@@ -11,11 +11,16 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-GOLD_API_URL = "https://www.goldapi.io/api/XAU/USD"
+GOLD_API_URL = "https://api.gold-api.com/price/XAU/USD"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
-# اگه درصد تغییرِ روزانه‌ی هر کدوم از قیمت‌ها (طلا، تتر، سکه) از این مقدار
-# بیشتر بشه، یک هشدار نوسان بالای پیام اضافه می‌شه.
+# gold-api.com فقط قیمت هر اونس رو می‌ده (برخلاف GoldAPI.io قبلی که مستقیم
+# قیمت هر گرم رو هم برمی‌گردوند)، پس خودمون از روی این ثابت تبدیلش می‌کنیم.
+GRAMS_PER_TROY_OUNCE = 31.1034768
+
+# اگه درصد تغییرِ روزانه‌ی تتر یا سکه از این مقدار بیشتر بشه، یک هشدار نوسان
+# بالای پیام اضافه می‌شه. (قیمت طلای جهانی از gold-api.com اصلاً درصد تغییر
+# روزانه نمی‌ده، پس دیگه توی این هشدار حساب نمی‌شه - پایین‌تر توضیح داده شده.)
 SIGNIFICANT_CHANGE_THRESHOLD = 2.0
 
 
@@ -26,19 +31,18 @@ def main():
     (GitHub Actions یا Windows Task Scheduler) سپرده شده که این اسکریپت رو
     هر ۳۰ دقیقه یک‌بار صدا می‌زنه.
     """
-    gold_api_key = os.getenv("GOLD_API_KEY")
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
-    brsapi_key = os.getenv("BRSAPI_KEY")  # اختیاریه؛ فقط برای قیمت تتر لازمه
+    brsapi_key = os.getenv("BRSAPI_KEY")  # اختیاریه؛ فقط برای قیمت تتر و سکه لازمه
 
-    if not all([gold_api_key, bot_token, channel_id]):
+    if not all([bot_token, channel_id]):
         sys.exit(
-            "Missing one of GOLD_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID "
+            "Missing one of TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID "
             "(check your .env file locally, or your repo secrets on GitHub Actions)."
         )
 
     try:
-        data = get_gold_price(gold_api_key)
+        data = get_gold_price()
         price_info = parse_price(data)
 
         # گرفتن قیمت‌های ایرانی عمداً "بهترین تلاش" (best-effort) است: اگه کلید
@@ -74,31 +78,33 @@ def main():
         sys.exit(f"Failed to post gold price: {e}")
 
 
-def get_gold_price(api_key):
+def get_gold_price():
     """
-    قیمت لحظه‌ای طلا رو از GoldAPI.io می‌گیره.
+    قیمت لحظه‌ای طلا رو از gold-api.com می‌گیره — رایگان، بدون کلید، و بدون
+    محدودیت نرخ درخواست (برخلاف GoldAPI.io که سهمیه‌ی رایگان ماهانه‌ش تموم شد).
     خروجی: دیکشنری خام JSON که سرور برگردونده.
     """
-    response = requests.get(
-        GOLD_API_URL,
-        headers={"x-access-token": api_key},
-        timeout=10,
-    )
+    response = requests.get(GOLD_API_URL, timeout=10)
     response.raise_for_status()
     return response.json()
 
 
 def parse_price(data):
     """
-    از پاسخ خام GoldAPI.io فقط فیلدهایی که برای پیام لازم داریم رو استخراج می‌کنه.
+    از پاسخ خام gold-api.com فقط فیلدهایی که برای پیام لازم داریم رو استخراج می‌کنه.
     این تابع خالص (pure) است: هیچ درخواست شبکه‌ای نمی‌زنه، فقط یک دیکشنری پردازش می‌کنه.
     ورودی نمونه:
-        {"price": 2650.4, "price_gram_24k": 85.2, "chp": -0.58, ...}
+        {"currency": "USD", "price": 4165.2, "symbol": "XAU", "updatedAt": "...", ...}
+
+    نکته: برخلاف GoldAPI.io قبلی، این سرویس قیمت هر گرم یا درصد تغییر روزانه رو
+    مستقیم نمی‌ده - فقط قیمت هر اونس. قیمت هر گرم (۲۴ عیار) رو خودمون حساب
+    می‌کنیم؛ درصد تغییر روزانه هم دیگه نداریم (برای همین توی پیام و هشدارها
+    فقط برای تتر/سکه نمایش داده می‌شه، نه برای طلای جهانی).
     """
+    ounce_usd = data["price"]
     return {
-        "ounce_usd": data["price"],
-        "gram_24k_usd": data["price_gram_24k"],
-        "change_percent": data["chp"],
+        "ounce_usd": ounce_usd,
+        "gram_24k_usd": ounce_usd / GRAMS_PER_TROY_OUNCE,
     }
 
 
@@ -189,15 +195,13 @@ def format_message(price_info, tether_info=None, coin_info=None):
     """
     یک پیام فارسیِ خوانا برای تلگرام از روی اطلاعات قیمت می‌سازه (تابع خالص، قابل تست).
     tether_info و coin_info اختیاری‌ان: هر کدوم داده بشن، یک بخش اضافه برای اون
-    قیمت به پیام اضافه می‌شه. اگه تغییر روزانه‌ی هر کدوم از قیمت‌ها از
-    SIGNIFICANT_CHANGE_THRESHOLD بیشتر باشه، یک بنر هشدار بالای پیام اضافه می‌شه.
+    قیمت به پیام اضافه می‌شه. اگه تغییر روزانه‌ی تتر یا سکه از
+    SIGNIFICANT_CHANGE_THRESHOLD بیشتر باشه، یک بنر هشدار بالای پیام اضافه می‌شه
+    (طلای جهانی توی این هشدار حساب نمی‌شه، چون gold-api.com درصد تغییر روزانه نمی‌ده).
     """
-    arrow = "🔺" if price_info["change_percent"] >= 0 else "🔻"
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     alerts = []
-    if is_significant_change(price_info["change_percent"]):
-        alerts.append("طلای جهانی")
     if tether_info is not None and is_significant_change(tether_info["change_percent"]):
         alerts.append("تتر")
     if coin_info is not None and is_significant_change(coin_info["change_percent"]):
@@ -210,7 +214,6 @@ def format_message(price_info, tether_info=None, coin_info=None):
         "",
         f"هر اونس: {price_info['ounce_usd']:.2f} دلار",
         f"هر گرم (۲۴ عیار): {price_info['gram_24k_usd']:.2f} دلار",
-        f"تغییر: {arrow} {abs(price_info['change_percent']):.2f}%",
     ]
 
     if tether_info is not None:
