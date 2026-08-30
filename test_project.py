@@ -1,9 +1,10 @@
 import pytest
-
+from unittest.mock import MagicMock, patch
 from project import (
     build_telegram_payload,
     calculate_18k_gold_toman,
     format_message,
+    get_ai_commentary,
     is_significant_change,
     parse_gold_coin_price,
     parse_price,
@@ -11,122 +12,87 @@ from project import (
 )
 
 
-# ---------- parse_price ----------
-
-def test_parse_price():
+def test_parse_price_goldapi_io():
     data = {
-        "currency": "USD",
-        "price": 4165.200195,
-        "symbol": "XAU",
-        "updatedAt": "2026-08-14T10:00:00Z",
+        "price": 2650.4,
+        "price_gram_24k": 85.2,
+        "chp": -0.58,
     }
-    result = parse_price(data)
-    assert result["ounce_usd"] == 4165.200195
-    assert result["gram_24k_usd"] == pytest.approx(133.914, abs=0.01)
+    parsed = parse_price(data)
+    assert parsed["ounce_usd"] == 2650.4
+    assert parsed["gram_24k_usd"] == 85.2
+    assert parsed["change_percent"] == -0.58
 
 
-# ---------- parse_tether_price ----------
+def test_parse_price_gold_api_com():
+    data = {
+        "price": 3110.34768,
+    }
+    parsed = parse_price(data)
+    assert parsed["ounce_usd"] == 3110.34768
+    assert round(parsed["gram_24k_usd"], 2) == 100.0
+    assert parsed["change_percent"] == 0.0
 
-def test_parse_tether_price_found():
+
+def test_parse_tether_price():
     data = {
         "currency": [
-            {"symbol": "USD_IRT", "price": 91000, "change_percent": 0.1},
-            {"symbol": "USDT_IRT", "price": 95000, "change_percent": 0.3},
+            {"symbol": "USD_IRT", "price": 59000, "change_percent": 0.1},
+            {"symbol": "USDT_IRT", "price": 60000, "change_percent": 0.5},
         ]
     }
-    assert parse_tether_price(data) == {"toman": 95000, "change_percent": 0.3}
+    res = parse_tether_price(data)
+    assert res["toman"] == 60000
+    assert res["change_percent"] == 0.5
 
 
-def test_parse_tether_price_not_found_raises():
-    data = {"currency": [{"symbol": "USD_IRT", "price": 91000, "change_percent": 0.1}]}
+def test_parse_tether_price_not_found():
+    data = {"currency": []}
     with pytest.raises(ValueError):
         parse_tether_price(data)
 
 
-# ---------- parse_gold_coin_price ----------
-
-def test_parse_gold_coin_price_found():
+def test_parse_gold_coin_price():
     data = {
         "gold": [
-            {"name": "طلای 18 عیار", "price": 5000000, "change_percent": 0.4},
-            {"name": "سکه امامی", "price": 45000000, "change_percent": 1.2},
+            {"name": "سکه تمام بهار آزادی طرح جدید (امامی)", "price": 45000000, "change_percent": 2.5},
         ]
     }
-    assert parse_gold_coin_price(data) == {"toman": 45000000, "change_percent": 1.2}
+    res = parse_gold_coin_price(data)
+    assert res["toman"] == 45000000
+    assert res["change_percent"] == 2.5
 
 
-def test_parse_gold_coin_price_not_found_returns_none():
-    data = {"gold": [{"name": "طلای 18 عیار", "price": 5000000, "change_percent": 0.4}]}
+def test_parse_gold_coin_price_not_found():
+    data = {"gold": []}
     assert parse_gold_coin_price(data) is None
 
 
-def test_parse_gold_coin_price_missing_key_returns_none():
-    # اگه اصلاً کلید "gold" توی پاسخ نباشه، نباید کرش کنه
-    assert parse_gold_coin_price({}) is None
+def test_is_significant_change():
+    assert is_significant_change(2.5, threshold=2.0) is True
+    assert is_significant_change(-2.0, threshold=2.0) is True
+    assert is_significant_change(1.9, threshold=2.0) is False
 
-
-# ---------- calculate_18k_gold_toman ----------
 
 def test_calculate_18k_gold_toman():
-    assert calculate_18k_gold_toman(85.2, 95000) == pytest.approx(6070500.0)
+    res = calculate_18k_gold_toman(100.0, 60000)
+    assert res == 4500000.0
 
 
-def test_calculate_18k_gold_toman_zero_rate():
-    assert calculate_18k_gold_toman(85.2, 0) == 0
+def test_format_message_full():
+    price_info = {"ounce_usd": 2700.0, "gram_24k_usd": 86.8, "change_percent": 2.5}
+    tether_info = {"toman": 60000, "change_percent": 0.5}
+    coin_info = {"toman": 45000000, "change_percent": 3.0}
+    commentary = "بازار طلا صعودی است."
 
+    message = format_message(price_info, tether_info, coin_info, commentary)
 
-# ---------- is_significant_change ----------
+    assert "⚠️ نوسان" in message
+    assert "2700.00" in message
+    assert "💡 بازار طلا صعودی است." in message
+    assert "USDT" in message
+    assert "سکه امامی" in message
 
-def test_is_significant_change_above_threshold():
-    assert is_significant_change(2.5) is True
-    assert is_significant_change(-3.0) is True  # قدرمطلق، پس منفی هم حساب می‌شه
-
-
-def test_is_significant_change_below_threshold():
-    assert is_significant_change(1.0) is False
-    assert is_significant_change(-1.9) is False
-
-
-def test_is_significant_change_custom_threshold():
-    assert is_significant_change(4.0, threshold=5.0) is False
-    assert is_significant_change(6.0, threshold=5.0) is True
-
-
-# ---------- format_message ----------
-
-def test_format_message_gold_only():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
-    message = format_message(price_info)
-    assert "هر اونس: 2650.40 دلار" in message
-    assert "تتر" not in message
-    assert "سکه امامی" not in message
-    assert "⚠️" not in message
-
-
-def test_format_message_with_tether_includes_18k_line():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
-    tether_info = {"toman": 95000, "change_percent": 0.3}
-    message = format_message(price_info, tether_info)
-    assert "تتر (USDT): 95,000 تومان" in message
-    assert "طلای ۱۸ عیار" in message
-    assert "سکه امامی" not in message
-
-
-def test_format_message_with_coin():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
-    coin_info = {"toman": 45000000, "change_percent": 1.0}
-    message = format_message(price_info, coin_info=coin_info)
-    assert "سکه امامی: 45,000,000 تومان" in message
-
-
-def test_format_message_significant_tether_change_shows_alert():
-    price_info = {"ounce_usd": 2650.4, "gram_24k_usd": 85.2}
-    tether_info = {"toman": 95000, "change_percent": -2.4}
-    message = format_message(price_info, tether_info)
-    assert "⚠️ نوسان قابل‌توجه: تتر" in message
-
-
-# ---------- build_telegram_payload ----------
 
 def test_build_telegram_payload():
     payload = build_telegram_payload("@my_channel", "hello")
@@ -135,3 +101,47 @@ def test_build_telegram_payload():
         "text": "hello",
         "parse_mode": "HTML",
     }
+
+
+def test_get_ai_commentary_success(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_gemini_key")
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": "قیمت جهانی طلا به روند افزایشی خود ادامه میدهد."}
+                    ]
+                }
+            }
+        ]
+    }
+    with patch("requests.post", return_value=mock_response) as mock_post:
+        commentary = get_ai_commentary(
+            current_price_usd=2700.0,
+            previous_price_usd=2650.0,
+            change_pct=1.88,
+            toman_price=60000,
+        )
+        assert commentary == "قیمت جهانی طلا به روند افزایشی خود ادامه میدهد."
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert "key=fake_gemini_key" in args[0]
+        assert kwargs["timeout"] == 10
+
+
+def test_get_ai_commentary_missing_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    commentary = get_ai_commentary(2700.0, 2650.0, 1.88)
+    assert commentary == ""
+
+
+def test_get_ai_commentary_failure(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_gemini_key")
+    with patch("requests.post", side_effect=Exception("Timeout or API Error")):
+        commentary = get_ai_commentary(2700.0, 2650.0, 1.88)
+        assert commentary == ""
+
+

@@ -1,159 +1,64 @@
 # Gold Price Telegram Bot
+#### Video Demo: <https://youtu.be/V6YMj8Dff7o>
+#### Description:
 
-A Python bot that posts live global gold prices — plus their Iranian Toman
-equivalents — to a Telegram channel every 30 minutes.
+Gold Price Telegram Bot is a small Python program that checks the live international gold spot price (XAU/USD) every 30 minutes and automatically posts a formatted update to a Telegram channel. It was built as my final project for CS50's Introduction to Programming with Python (CS50P), and it draws on nearly everything covered in the course: working with a web API (`requests`), reading configuration from the environment, string formatting, exception handling, an infinite polling loop, and a test suite written with `pytest`.
 
-Built as the final project for Harvard's [CS50P](https://cs50.harvard.edu/python/).
+## Why this project?
 
-## Overview
+Gold is widely followed as a store of value, and its price changes throughout the trading day. Rather than opening a website or app to check it, I wanted a lightweight bot that pushes the current price straight into a Telegram channel on a fixed schedule, so anyone subscribed to the channel sees an update without having to look anything up themselves.
 
-The bot fetches the current spot price of gold from [gold-api.com](https://gold-api.com/)
-and, optionally, the Tether (USDT) exchange rate and Emami gold coin price
-from [brsapi.ir](https://brsapi.ir/), then posts a formatted summary to a
-Telegram channel. It's designed to run as a short-lived script triggered by
-an external scheduler (GitHub Actions cron), rather than as a long-running
-process.
+## How it works
 
-> **Note:** this originally used [GoldAPI.io](https://www.goldapi.io/), but
-> its free tier caps out at a small monthly request quota — nowhere near
-> enough for a post every 30 minutes. gold-api.com's real-time price
-> endpoint is free and has no rate limit, at the cost of a slightly less
-> detailed response (no per-gram price or daily change % — see "Notes &
-> caveats" below).
+At a high level, the bot repeats the following cycle every 30 minutes:
 
-## Features
+1. It calls the [GoldAPI.io](https://www.goldapi.io) REST API to fetch the current XAU/USD spot price, along with the price per gram of 24-karat gold and the percentage change for the day.
+2. It extracts just the fields it needs from that response.
+3. It formats those numbers into a short, readable Persian-language message with an up/down arrow depending on whether the price moved up or down.
+4. It sends that message to a Telegram channel using Telegram's Bot API (`sendMessage`).
+5. It waits 30 minutes and repeats, catching and logging any error along the way (a failed request one cycle should not crash the whole bot).
 
-- 🥇 **Global gold price** — per troy ounce and per gram (24k), in USD
-- 💵 **Tether (USDT) price** in Toman
-- 🥇 **18k gold price** per gram, in Toman (derived from the USD gold price
-  and the Tether rate)
-- 🟡 **Emami gold coin price** in Toman
-- ⚠️ **Significant-change alerts** — a warning banner appears automatically
-  when Tether's or the coin's daily change exceeds a configurable threshold
-  (default: 2%). Not available for the gold price itself — see caveats below.
-- **Resilient by design** — if the Iranian price source (brsapi.ir) is
-  unreachable, or one specific value can't be found in its response, the bot
-  still posts the core gold price without failing outright. Each optional
-  value (Tether, 18k Toman price, coin price) degrades independently.
-- Fully **unit tested** (pytest) — all data-parsing and message-formatting
-  logic is covered
+## Files
 
-## Example output
+- **`project.py`** contains all of the program's logic. Besides `main`, it defines six additional functions:
+  - `get_gold_price(api_key)` calls the GoldAPI.io endpoint and returns the raw JSON response as a dictionary. This is the only function that talks to the gold price API.
+  - `get_ai_commentary(current_price_usd, previous_price_usd, change_pct, toman_price=None)` calls the Google Gemini API via REST to obtain a short, natural Persian commentary on price movement. It handles errors gracefully by returning an empty string if the call fails or if the API key is missing.
+  - `parse_price(data)` is a **pure function**: given a dictionary (the API's response), it returns a small, clean dictionary with just the three values the rest of the program cares about (`ounce_usd`, `gram_24k_usd`, `change_percent`). Because it does no I/O, it's trivial to unit test with fake input.
+  - `format_message(price_info)` is also a pure function. It takes that clean price dictionary and returns the exact string that will be posted to Telegram, including an emoji arrow, optional AI commentary, and a timestamp.
+  - `build_telegram_payload(chat_id, text)` is a third pure function; it builds the dictionary of form data that Telegram's API expects, separating "what to send" from "actually sending it."
+  - `send_telegram_message(bot_token, payload)` performs the actual HTTP POST to Telegram and is the only function that talks to the Telegram API.
+- **`test_project.py`** contains `pytest` tests for the pure functions and unit tests for `get_ai_commentary` (mocking the REST call for both success and failure cases).
+- **`requirements.txt`** lists the two third-party packages the project depends on: `requests` (for HTTP calls) and `python-dotenv` (for loading secrets from a local `.env` file instead of hard-coding them).
+- **`.env.example`** documents which environment variables the program expects (`GOLD_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `GEMINI_API_KEY`) without containing any real secrets, so it's safe to commit to version control. A real `.env` file (which is not committed) supplies the actual values.
 
-```
-🥇 قیمت لحظه‌ای طلای جهانی
-⚠️ نوسان قابل‌توجه: سکه امامی
+## AI Market Commentary (Gemini Integration)
 
-هر اونس: 2650.40 دلار
-هر گرم (۲۴ عیار): 85.20 دلار
+The bot incorporates short AI-generated Persian market commentary into the posted message using Google's Gemini API via REST (`generateContent`).
+- **REST Call**: Sends current price, previous price, percent change, and optional Toman price directly to Gemini via HTTP POST without local SDKs or proxies.
+- **Graceful Fallback**: The request has a ~10-second timeout and is wrapped in exception handling. If the API key (`GEMINI_API_KEY`) is omitted, or if the API fails or times out, the function returns an empty string, allowing the bot to post the core price update without crashing.
+- **GitHub Secret**: To enable AI commentary in automated workflow runs, a `GEMINI_API_KEY` repository secret must be added to your GitHub repository secrets.
 
-💵 تتر (USDT): 95,000 تومان
-تغییر: 🔺 0.30%
+## Design decisions
 
-🥇 طلای ۱۸ عیار: 6,070,500 تومان
+I chose to read all secrets (API keys and tokens) from environment variables rather than hard-coding them, both because it's unsafe to commit credentials to a public GitHub repository, and because it makes the same code portable to any server without editing the source.
 
-🟡 سکه امامی: 62,000,000 تومان
-تغییر: 🔻 3.10%
+I split the "get data," "transform data," and "send data" responsibilities into separate, small functions instead of one large `main` function. This was primarily so that the transformation logic (`parse_price`, `format_message`, `build_telegram_payload`) could be unit-tested in isolation, satisfying the project's testing requirement, without needing to mock network calls or expose real credentials just to run the test suite.
 
-🕒 بروزرسانی: 2026-08-14 15:00
-```
+For scheduling, `main()` performs exactly one fetch-format-send cycle and then exits, rather than looping forever with `time.sleep`. Repetition every 30 minutes is handled by an external scheduler instead: a GitHub Actions workflow (`.github/workflows/gold-price.yml`) with a cron trigger (`*/30 * * * *`) checks out the repository and runs `python project.py` every 30 minutes, 24/7, using GitHub's own servers. I chose this over an in-process infinite loop because it doesn't require my own computer to stay on and connected at all times, and because a fresh process each run means a single failed request can't leave the bot stuck or crashed for good. The three secrets (`GOLD_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`) are stored as encrypted GitHub Actions repository secrets rather than committed in a `.env` file, and are injected as environment variables only for the duration of each scheduled run.
 
-<!-- TODO: replace this with a real screenshot from the @Gold30m_up channel -->
+## How to run it
 
-## Tech stack
+### Locally, once (for testing)
+1. Create a bot with [@BotFather](https://t.me/BotFather) on Telegram and note the token it gives you.
+2. Add that bot as an administrator (with permission to post messages) to your Telegram channel.
+3. Sign up for a free API key at [goldapi.io](https://www.goldapi.io).
+4. Copy `.env.example` to `.env` and fill in your real `GOLD_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHANNEL_ID`.
+5. Install dependencies: `pip install -r requirements.txt`
+6. Run the bot once: `python project.py`
+7. Run the tests: `pytest test_project.py`
 
-- Python 3.11+
-- [`requests`](https://pypi.org/project/requests/) — HTTP calls to both APIs
-- [`python-dotenv`](https://pypi.org/project/python-dotenv/) — local `.env` config
-- [`pytest`](https://pypi.org/project/pytest/) — testing
-- GitHub Actions (`schedule` trigger) — runs the bot every 30 minutes without
-  needing a server
-
-## Project structure
-
-```
-.
-├── project.py          # main script: fetch prices, format message, send to Telegram
-├── test_project.py     # pytest test suite
-├── requirements.txt    # runtime dependencies
-├── .env.example         # template for local environment variables
-└── .github/
-    └── workflows/
-        └── post-gold-price.yml   # scheduled GitHub Actions workflow
-```
-
-## Setup (local)
-
-1. Clone the repo and create a virtual environment:
-   ```bash
-   git clone <your-repo-url>
-   cd <your-repo>
-   python -m venv venv
-   source venv/bin/activate   # Windows: venv\Scripts\activate
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Copy `.env.example` to `.env` and fill in your keys:
-   ```bash
-   cp .env.example .env
-   ```
-
-   | Variable | Required | Description |
-   |---|---|---|
-   | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
-   | `TELEGRAM_CHANNEL_ID` | Yes | Your Telegram channel's ID (e.g. `@your_channel`) |
-   | `BRSAPI_KEY` | No | API key from [brsapi.ir](https://brsapi.ir/) — enables the Tether, 18k Toman, and coin price lines |
-
-   (gold-api.com needs no key at all — the gold price line works with zero configuration.)
-
-4. Run it:
-   ```bash
-   python project.py
-   ```
-
-## Running tests
-
-```bash
-pip install pytest
-pytest test_project.py -v
-```
-
-All the data-parsing (`parse_price`, `parse_tether_price`,
-`parse_gold_coin_price`) and pure calculation/formatting functions
-(`calculate_18k_gold_toman`, `is_significant_change`, `format_message`) are
-covered — the only untested parts are the three thin I/O functions that call
-external APIs (`get_gold_price`, `get_iran_prices`, `send_telegram_message`),
-by design.
-
-## Deployment
-
-The bot is designed to run on a schedule via **GitHub Actions**, so it needs
-no server of its own:
-
-1. Add `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, and `BRSAPI_KEY` as
-   **repository secrets** (Settings → Secrets and variables → Actions). If
-   you still have a `GOLD_API_KEY` secret from an earlier version, it's no
-   longer used — safe to delete.
-2. The included workflow (`.github/workflows/post-gold-price.yml`) runs the
-   script every 30 minutes.
-
-## Notes & caveats
-
-- **No daily change % for the gold price itself.** gold-api.com's free
-  real-time endpoint only returns the current spot price — no per-gram
-  price (we compute that ourselves) and no daily change percentage (unlike
-  the previous GoldAPI.io integration). The significant-change alert only
-  covers Tether and the coin price as a result.
-- The 18k-gram and Emami-coin Toman prices are **global-equivalent**
-  conversions (spot price × Tether rate), not the exact retail price you'd
-  see at an Iranian jewelry shop — local retail prices also factor in labor
-  fees (اجرت), profit margin, and tax.
-- brsapi.ir doesn't publish a stable documented `symbol` for the Emami coin,
-  so `parse_gold_coin_price` matches by the Persian name (`امامی`) instead,
-  which is more robust to minor API changes.
-
-## License
-
-MIT — feel free to use or adapt this for your own projects.
+### Continuously, every 30 minutes (deployment)
+This repository includes `.github/workflows/gold-price.yml`, a GitHub Actions workflow that runs `project.py` every 30 minutes automatically, without needing my own computer to be on.
+1. Push this project to a GitHub repository.
+2. In the repository's Settings → Secrets and variables → Actions, add three repository secrets with the exact names `GOLD_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHANNEL_ID`.
+3. That's it — GitHub will run the workflow on its own schedule from then on. It can also be triggered manually from the repository's Actions tab for testing.

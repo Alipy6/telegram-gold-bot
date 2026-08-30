@@ -5,51 +5,32 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 
-# .env رو نسبت به مسیر خودِ فایل project.py بارگذاری می‌کنیم (نه نسبت به پوشه‌ای
-# که ازش اجرا شده). اگه .env پیدا نشه (مثلاً روی GitHub Actions که secrets رو
-# مستقیم به‌عنوان environment variable تزریق می‌کنه)، این خط بی‌خطر رد می‌شه.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-GOLD_API_URL = "https://api.gold-api.com/price/XAU/USD"
+GOLD_API_URL = "https://api.gold-api.com/price/XAU"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
-# gold-api.com فقط قیمت هر اونس رو می‌ده (برخلاف GoldAPI.io قبلی که مستقیم
-# قیمت هر گرم رو هم برمی‌گردوند)، پس خودمون از روی این ثابت تبدیلش می‌کنیم.
-GRAMS_PER_TROY_OUNCE = 31.1034768
-
-# اگه درصد تغییرِ روزانه‌ی تتر یا سکه از این مقدار بیشتر بشه، یک هشدار نوسان
-# بالای پیام اضافه می‌شه. (قیمت طلای جهانی از gold-api.com اصلاً درصد تغییر
-# روزانه نمی‌ده، پس دیگه توی این هشدار حساب نمی‌شه - پایین‌تر توضیح داده شده.)
 SIGNIFICANT_CHANGE_THRESHOLD = 2.0
 
 
 def main():
-    """
-    یک چرخه‌ی کامل رو اجرا می‌کنه (گرفتن قیمت، ساخت پیام، ارسال) و بعد تموم می‌شه.
-    تکرار هر ۳۰ دقیقه دیگه مسئولیت خودِ این فایل نیست - به یک زمان‌بند بیرونی
-    (GitHub Actions یا Windows Task Scheduler) سپرده شده که این اسکریپت رو
-    هر ۳۰ دقیقه یک‌بار صدا می‌زنه.
-    """
+    gold_api_key = os.getenv("GOLD_API_KEY")
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
-    brsapi_key = os.getenv("BRSAPI_KEY")  # اختیاریه؛ فقط برای قیمت تتر و سکه لازمه
+    brsapi_key = os.getenv("BRSAPI_KEY")
 
     if not all([bot_token, channel_id]):
         sys.exit(
-            "Missing one of TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID "
+            "Missing required environment variables TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL_ID "
             "(check your .env file locally, or your repo secrets on GitHub Actions)."
         )
 
     try:
-        data = get_gold_price()
+        data = get_gold_price(gold_api_key)
         price_info = parse_price(data)
 
-        # گرفتن قیمت‌های ایرانی عمداً "بهترین تلاش" (best-effort) است: اگه کلید
-        # نداریم یا brsapi.ir قطع/در حال آپدیت بود، فقط از این بخش رد می‌شیم و
-        # پیام طلا رو بدون این خط‌ها می‌فرستیم - یک مشکل جانبی نباید کل پست رو
-        # متوقف کنه. تتر و سکه هم مستقل از هم پردازش می‌شن: اگه یکی‌شون توی
-        # پاسخ brsapi.ir پیدا نشه (مثلاً ValueError)، اون‌یکی همچنان کار می‌کنه.
         tether_info = None
         coin_info = None
         if brsapi_key:
@@ -69,54 +50,47 @@ def main():
                 except Exception as e:
                     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Coin price unavailable: {e}")
 
-        message = format_message(price_info, tether_info, coin_info)
+        toman_price = tether_info["toman"] if tether_info else None
+        commentary = get_ai_commentary(
+            current_price_usd=price_info["ounce_usd"],
+            previous_price_usd=None,
+            change_pct=price_info["change_percent"],
+            toman_price=toman_price,
+        )
+
+        message = format_message(price_info, tether_info, coin_info, commentary)
         payload = build_telegram_payload(channel_id, message)
         send_telegram_message(bot_token, payload)
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Sent: {message!r}")
     except Exception as e:
-        # exit code غیرصفر باعث می‌شه GitHub Actions اجرا رو "failed" علامت بزنه
         sys.exit(f"Failed to post gold price: {e}")
 
 
-def get_gold_price():
-    """
-    قیمت لحظه‌ای طلا رو از gold-api.com می‌گیره — رایگان، بدون کلید، و بدون
-    محدودیت نرخ درخواست (برخلاف GoldAPI.io که سهمیه‌ی رایگان ماهانه‌ش تموم شد).
-    خروجی: دیکشنری خام JSON که سرور برگردونده.
-    """
-    response = requests.get(GOLD_API_URL, timeout=10)
+def get_gold_price(api_key=None):
+    headers = {}
+    if api_key:
+        headers["x-access-token"] = api_key
+    response = requests.get(
+        GOLD_API_URL,
+        headers=headers,
+        timeout=10,
+    )
     response.raise_for_status()
     return response.json()
 
 
 def parse_price(data):
-    """
-    از پاسخ خام gold-api.com فقط فیلدهایی که برای پیام لازم داریم رو استخراج می‌کنه.
-    این تابع خالص (pure) است: هیچ درخواست شبکه‌ای نمی‌زنه، فقط یک دیکشنری پردازش می‌کنه.
-    ورودی نمونه:
-        {"currency": "USD", "price": 4165.2, "symbol": "XAU", "updatedAt": "...", ...}
-
-    نکته: برخلاف GoldAPI.io قبلی، این سرویس قیمت هر گرم یا درصد تغییر روزانه رو
-    مستقیم نمی‌ده - فقط قیمت هر اونس. قیمت هر گرم (۲۴ عیار) رو خودمون حساب
-    می‌کنیم؛ درصد تغییر روزانه هم دیگه نداریم (برای همین توی پیام و هشدارها
-    فقط برای تتر/سکه نمایش داده می‌شه، نه برای طلای جهانی).
-    """
     ounce_usd = data["price"]
+    gram_24k_usd = data.get("price_gram_24k", ounce_usd / 31.1034768)
+    change_percent = data.get("chp", data.get("change_percent", 0.0))
     return {
         "ounce_usd": ounce_usd,
-        "gram_24k_usd": ounce_usd / GRAMS_PER_TROY_OUNCE,
+        "gram_24k_usd": gram_24k_usd,
+        "change_percent": change_percent,
     }
 
 
 def get_iran_prices(api_key):
-    """
-    قیمت‌های داخلی (طلا، ارز، رمزارز به تومن) رو از brsapi.ir می‌گیره.
-    خروجی: دیکشنری خام JSON با سه کلید gold/currency/cryptocurrency.
-
-    نکته: brsapi.ir درخواست‌هایی با User-Agent پیش‌فرض کتابخونه‌های پایتون/Go رو
-    خودکار مسدود می‌کنه (حتی تا ۲ ساعت مسدودی IP)، پس عمداً یک User-Agent شبیه
-    مرورگر واقعی می‌فرستیم تا این اتفاق نیفته.
-    """
     response = requests.get(
         "https://Api.BrsApi.ir/Market/Gold_Currency.php",
         params={"key": api_key},
@@ -133,88 +107,92 @@ def get_iran_prices(api_key):
 
 
 def parse_tether_price(data):
-    """
-    از پاسخ brsapi.ir فقط قیمت تتر (USDT) به تومن رو استخراج می‌کنه؛ داخل
-    لیست data["currency"] دنبال آیتمی با symbol == "USDT_IRT" می‌گرده.
-    این تابع خالص (pure) است: هیچ درخواست شبکه‌ای نمی‌زنه.
-    """
-    for item in data["currency"]:
-        if item["symbol"] == "USDT_IRT":
+    for item in data.get("currency", []):
+        if item.get("symbol") == "USDT_IRT":
             return {
                 "toman": item["price"],
-                "change_percent": item["change_percent"],
+                "change_percent": item.get("change_percent", 0.0),
             }
     raise ValueError("USDT_IRT not found in brsapi.ir response")
 
 
 def parse_gold_coin_price(data):
-    """
-    قیمت سکه امامی رو از پاسخ brsapi.ir استخراج می‌کنه؛ داخل لیست data["gold"]
-    دنبال آیتمی می‌گرده که کلمه‌ی "امامی" توی فیلد name اش باشه.
-
-    نکته: brsapi.ir برخلاف currency (که symbol ثابت USDT_IRT داره)، مستندات
-    رسمی‌ای برای symbol دقیق سکه امامی منتشر نکرده؛ به همین خاطر عمداً بر پایه‌ی
-    نام فارسی (که در توضیحات API دیده شده) جستجو می‌کنه - این روش نسبت به تغییر
-    احتمالی symbol مقاوم‌تره. اگه پیدا نشه (مثلاً fallback به None به‌جای raise)
-    None برمی‌گردونه، دقیقاً مثل رفتار best-effort تتر توی main().
-
-    این تابع خالص (pure) است: هیچ درخواست شبکه‌ای نمی‌زنه.
-    """
     for item in data.get("gold", []):
         if "امامی" in item.get("name", ""):
             return {
                 "toman": item["price"],
-                "change_percent": item.get("change_percent", 0),
+                "change_percent": item.get("change_percent", 0.0),
             }
     return None
 
 
 def is_significant_change(change_percent, threshold=SIGNIFICANT_CHANGE_THRESHOLD):
-    """
-    آیا اندازه‌ی (قدرمطلق) درصد تغییر از آستانه‌ی مشخص‌شده بیشتره؟
-    این تابع خالص (pure) است.
-    """
     return abs(change_percent) >= threshold
 
 
 def calculate_18k_gold_toman(gram_24k_usd, tether_toman):
-    """
-    قیمت هر گرم طلای ۱۸ عیار رو به تومان حساب می‌کنه؛ از قیمت گرم ۲۴ عیار (دلار،
-    که خودِ GoldAPI.io مستقیم می‌ده) و نرخ تتر به تومان استفاده می‌کنه.
-    این تابع خالص (pure) است: هیچ درخواست شبکه‌ای نمی‌زنه، فقط دو عدد رو پردازش می‌کنه.
-
-    نکته: این معادل «جهانی» قیمت ۱۸ عیاره، نه لزوماً قیمت دقیق بازار طلافروشی
-    ایران (که معمولاً اجرت، سود و مالیات هم روش اضافه می‌شه).
-    """
     gram_24k_toman = gram_24k_usd * tether_toman
     gram_18k_toman = gram_24k_toman * 0.75
     return gram_18k_toman
 
 
-def format_message(price_info, tether_info=None, coin_info=None):
-    """
-    یک پیام فارسیِ خوانا برای تلگرام از روی اطلاعات قیمت می‌سازه (تابع خالص، قابل تست).
-    tether_info و coin_info اختیاری‌ان: هر کدوم داده بشن، یک بخش اضافه برای اون
-    قیمت به پیام اضافه می‌شه. اگه تغییر روزانه‌ی تتر یا سکه از
-    SIGNIFICANT_CHANGE_THRESHOLD بیشتر باشه، یک بنر هشدار بالای پیام اضافه می‌شه
-    (طلای جهانی توی این هشدار حساب نمی‌شه، چون gold-api.com درصد تغییر روزانه نمی‌ده).
-    """
+def get_ai_commentary(current_price_usd, previous_price_usd=None, change_pct=0.0, toman_price=None):
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return ""
+
+    try:
+        toman_info = f"، قیمت تومان: {toman_price}" if toman_price is not None else ""
+        prompt = (
+            f"قیمت فعلی طلا: {current_price_usd} دلار، "
+            f"تغییرات: {change_pct}%{toman_info}.\n"
+            "لطفاً فقط یک جمله کوتاه و طبیعی به زبان فارسی درباره تحلیل حرکت قیمت طلا بنویس. "
+            "هیچ دیسکلایمر، هشدار عام یا مقدمهای ننویس و اعداد خام را دوباره تکرار نکن."
+        )
+
+        url = f"{GEMINI_API_URL}?key={api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ]
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Gemini AI commentary unavailable: {e}")
+        return ""
+
+
+def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
+    arrow = "🔺" if price_info["change_percent"] >= 0 else "🔻"
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     alerts = []
+    if is_significant_change(price_info["change_percent"]):
+        alerts.append("طلای جهانی")
     if tether_info is not None and is_significant_change(tether_info["change_percent"]):
         alerts.append("تتر")
     if coin_info is not None and is_significant_change(coin_info["change_percent"]):
         alerts.append("سکه امامی")
 
-    lines = ["<b>🥇 قیمت لحظه‌ای طلای جهانی</b>"]
+    lines = ["<b>🥇 قیمت لحظهای طلای جهانی</b>"]
     if alerts:
-        lines.append(f"⚠️ نوسان قابل‌توجه: {'، '.join(alerts)}")
+        lines.append(f"⚠️ نوسان قابلتوجه: {'، '.join(alerts)}")
     lines += [
         "",
         f"هر اونس: {price_info['ounce_usd']:.2f} دلار",
         f"هر گرم (۲۴ عیار): {price_info['gram_24k_usd']:.2f} دلار",
+        f"تغییر: {arrow} {abs(price_info['change_percent']):.2f}%",
     ]
+
+    if commentary:
+        lines += ["", f"💡 {commentary}"]
 
     if tether_info is not None:
         tether_arrow = "🔺" if tether_info["change_percent"] >= 0 else "🔻"
@@ -240,7 +218,6 @@ def format_message(price_info, tether_info=None, coin_info=None):
 
 
 def build_telegram_payload(chat_id, text):
-    """payload لازم برای فراخوانی sendMessage تلگرام رو می‌سازه (تابع خالص، قابل تست)."""
     return {
         "chat_id": chat_id,
         "text": text,
@@ -249,7 +226,6 @@ def build_telegram_payload(chat_id, text):
 
 
 def send_telegram_message(bot_token, payload):
-    """پیام رو با فراخوانی واقعی Telegram Bot API ارسال می‌کنه."""
     url = TELEGRAM_API_URL.format(token=bot_token)
     response = requests.post(url, data=payload, timeout=10)
     response.raise_for_status()
