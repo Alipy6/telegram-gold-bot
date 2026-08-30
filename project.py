@@ -181,9 +181,9 @@ def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
     if coin_info is not None and is_significant_change(coin_info["change_percent"]):
         alerts.append("سکه امامی")
 
-    lines = ["<b>🥇 قیمت لحظهای طلای جهانی</b>"]
+    lines = ["<b>🥇 قیمت لحظه ای طلای جهانی</b>"]
     if alerts:
-        lines.append(f"⚠️ نوسان قابلتوجه: {'، '.join(alerts)}")
+        lines.append(f"⚠️ نوسان قابل توجه: {'، '.join(alerts)}")
     lines += [
         "",
         f"هر اونس: {price_info['ounce_usd']:.2f} دلار",
