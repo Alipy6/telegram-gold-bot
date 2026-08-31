@@ -10,7 +10,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 GOLD_API_URL = "https://api.gold-api.com/price/XAU"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
 
 SIGNIFICANT_CHANGE_THRESHOLD = 2.0
 
