@@ -2,12 +2,14 @@ name: Post gold price to Telegram
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # هر ۳۰ دقیقه، ۲۴ ساعته - حتی وقتی سیستم خودت خاموشه
-  workflow_dispatch: {}       # اجازه‌ی اجرای دستی از تب Actions، برای تست
+    - cron: "0 * * * *"   # هر ساعت، سر ساعت
+  workflow_dispatch: {}       # اجازهی اجرای دستی از تب Actions، برای تست
 
 jobs:
   post-price:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,3 +30,10 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           BRSAPI_KEY: ${{ secrets.BRSAPI_KEY }}
         run: python project.py
+
+      - name: Commit and push price history
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add gold_price_history.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "update gold price history [skip ci]" && git push)
