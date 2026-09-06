@@ -1,6 +1,7 @@
+import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -10,9 +11,10 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 GOLD_API_URL = "https://api.gold-api.com/price/XAU"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 SIGNIFICANT_CHANGE_THRESHOLD = 2.0
+HISTORY_FILE = os.path.join(BASE_DIR, "gold_price_history.json")
 
 
 def main():
@@ -28,8 +30,9 @@ def main():
         )
 
     try:
+        history = load_price_history()
         data = get_gold_price(gold_api_key)
-        price_info = parse_price(data)
+        price_info = parse_price(data, history=history)
 
         tether_info = None
         coin_info = None
@@ -56,7 +59,11 @@ def main():
             previous_price_usd=None,
             change_pct=price_info["change_percent"],
             toman_price=toman_price,
+            tether_info=tether_info,
+            coin_info=coin_info,
         )
+
+        record_price_history(price_info["ounce_usd"])
 
         message = format_message(price_info, tether_info, coin_info, commentary)
         payload = build_telegram_payload(channel_id, message)
@@ -79,15 +86,129 @@ def get_gold_price(api_key=None):
     return response.json()
 
 
-def parse_price(data):
+def parse_price(data, history=None):
     ounce_usd = data["price"]
     gram_24k_usd = data.get("price_gram_24k", ounce_usd / 31.1034768)
-    change_percent = data.get("chp", data.get("change_percent", 0.0))
+
+    if history is not None:
+        change_percent = calculate_24h_change(ounce_usd, history)
+    elif "chp" in data:
+        change_percent = data["chp"]
+    elif "change_percent" in data:
+        change_percent = data["change_percent"]
+    else:
+        change_percent = 0.0
+
     return {
         "ounce_usd": ounce_usd,
         "gram_24k_usd": gram_24k_usd,
         "change_percent": change_percent,
     }
+
+
+def _parse_timestamp(ts):
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if isinstance(ts, str):
+        try:
+            return float(ts)
+        except ValueError:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+    raise ValueError(f"Unsupported timestamp format: {ts}")
+
+
+def load_price_history(filepath=HISTORY_FILE):
+    if not os.path.exists(filepath):
+        return []
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            return []
+    except Exception as e:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Could not read history file: {e}")
+        return []
+
+
+def save_price_history(history, filepath=HISTORY_FILE):
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Could not write history file: {e}")
+
+
+def calculate_24h_change(current_price_usd, history, current_timestamp=None):
+    if not history or not isinstance(history, list):
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Info: Historical data not available yet.")
+        return 0.0
+
+    if current_timestamp is None:
+        current_timestamp = datetime.now(timezone.utc).timestamp()
+    elif isinstance(current_timestamp, datetime):
+        if current_timestamp.tzinfo is None:
+            current_timestamp = current_timestamp.replace(tzinfo=timezone.utc)
+        current_timestamp = current_timestamp.timestamp()
+    elif isinstance(current_timestamp, (int, float)):
+        current_timestamp = float(current_timestamp)
+    elif isinstance(current_timestamp, str):
+        try:
+            current_timestamp = _parse_timestamp(current_timestamp)
+        except Exception:
+            current_timestamp = datetime.now(timezone.utc).timestamp()
+
+    valid_records = []
+    for rec in history:
+        if isinstance(rec, dict) and "price_usd" in rec and "timestamp" in rec:
+            try:
+                ts = _parse_timestamp(rec["timestamp"])
+                price = float(rec["price_usd"])
+                valid_records.append((ts, price))
+            except (ValueError, TypeError):
+                continue
+
+    if not valid_records:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Info: No valid historical records found.")
+        return 0.0
+
+    target_ts = current_timestamp - 86400.0
+
+    valid_records.sort(key=lambda x: x[0])
+    oldest_ts, oldest_price = valid_records[0]
+
+    if (oldest_ts - target_ts) > 43200.0:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Info: Historical data is not old enough yet.")
+        return 0.0
+
+    closest_ts, closest_price = min(valid_records, key=lambda x: abs(x[0] - target_ts))
+
+    if closest_price == 0:
+        return 0.0
+
+    change_pct = ((current_price_usd - closest_price) / closest_price) * 100.0
+    return round(change_pct, 2)
+
+
+def record_price_history(current_price_usd, timestamp=None, filepath=HISTORY_FILE):
+    history = load_price_history(filepath)
+    if timestamp is None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+    elif isinstance(timestamp, datetime):
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.isoformat()
+
+    history.append({
+        "timestamp": timestamp,
+        "price_usd": current_price_usd,
+    })
+    save_price_history(history, filepath)
+
 
 
 def get_iran_prices(api_key):
@@ -136,18 +257,55 @@ def calculate_18k_gold_toman(gram_24k_usd, tether_toman):
     return gram_18k_toman
 
 
-def get_ai_commentary(current_price_usd, previous_price_usd=None, change_pct=0.0, toman_price=None):
+def get_ai_commentary(
+    current_price_usd,
+    previous_price_usd=None,
+    change_pct=0.0,
+    toman_price=None,
+    tether_info=None,
+    coin_info=None,
+    tether_change_pct=None,
+    coin_price=None,
+    coin_change_pct=None,
+):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return ""
 
+    toman_val = toman_price
+    tether_change_val = tether_change_pct
+    if tether_info and isinstance(tether_info, dict):
+        if toman_val is None:
+            toman_val = tether_info.get("toman")
+        if tether_change_val is None:
+            tether_change_val = tether_info.get("change_percent")
+
+    coin_val = coin_price
+    coin_change_val = coin_change_pct
+    if coin_info and isinstance(coin_info, dict):
+        if coin_val is None:
+            coin_val = coin_info.get("toman")
+        if coin_change_val is None:
+            coin_change_val = coin_info.get("change_percent")
+
     try:
-        toman_info = f"، قیمت تومان: {toman_price}" if toman_price is not None else ""
+        details = [f"قیمت انس طلای جهانی: {current_price_usd} دلار (تغییرات ۲۴ ساعته: {change_pct}%)"]
+
+        if toman_val is not None:
+            t_change_str = f" با تغییرات {tether_change_val}%" if tether_change_val is not None else ""
+            details.append(f"نرخ تتر/تومان: {toman_val:,} تومان{t_change_str}")
+
+        if coin_val is not None:
+            c_change_str = f" با تغییرات {coin_change_val}%" if coin_change_val is not None else ""
+            details.append(f"قیمت سکه امامی: {coin_val:,} تومان{c_change_str}")
+
+        market_context = "\n".join(details)
+
         prompt = (
-            f"قیمت فعلی طلا: {current_price_usd} دلار، "
-            f"تغییرات: {change_pct}%{toman_info}.\n"
-            "لطفاً فقط یک جمله کوتاه و طبیعی به زبان فارسی درباره تحلیل حرکت قیمت طلا بنویس. "
-            "هیچ دیسکلایمر، هشدار عام یا مقدمهای ننویس و اعداد خام را دوباره تکرار نکن."
+            f"اطلاعات بازار:\n{market_context}\n\n"
+            "لطفاً یک تحلیل کوتاه، تحلیلی و طبیعی به زبان فارسی (در ۱ الی ۲ جمله) ارائه دهید "
+            "که رابطه و اثر همزمان طلای جهانی، نرخ تتر/تومان و قیمت سکه امامی بر بازار داخلی را بررسی کند. "
+            "از نوشتن دیسکلایمر، مقدمه، یا تکرار مستقیم اعداد خام خودداری کنید."
         )
 
         url = f"{GEMINI_API_URL}?key={api_key}"
@@ -181,9 +339,9 @@ def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
     if coin_info is not None and is_significant_change(coin_info["change_percent"]):
         alerts.append("سکه امامی")
 
-    lines = ["<b>🥇 قیمت لحظه ای طلای جهانی</b>"]
+    lines = ["<b>🥇 قیمت لحظهای طلای جهانی</b>"]
     if alerts:
-        lines.append(f"⚠️ نوسان قابل توجه: {'، '.join(alerts)}")
+        lines.append(f"⚠️ نوسان قابلتوجه: {'، '.join(alerts)}")
     lines += [
         "",
         f"هر اونس: {price_info['ounce_usd']:.2f} دلار",
