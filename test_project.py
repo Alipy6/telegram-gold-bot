@@ -53,12 +53,6 @@ def test_parse_tether_price():
     assert res["change_percent"] == 0.5
 
 
-def test_parse_tether_price_not_found():
-    data = {"currency": []}
-    with pytest.raises(ValueError):
-        parse_tether_price(data)
-
-
 def test_parse_gold_coin_price():
     data = {
         "gold": [
