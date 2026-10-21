@@ -1,7 +1,7 @@
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -11,10 +11,14 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 GOLD_API_URL = "https://api.gold-api.com/price/XAU"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 SIGNIFICANT_CHANGE_THRESHOLD = 2.0
 HISTORY_FILE = os.path.join(BASE_DIR, "gold_price_history.json")
+MAX_HISTORY_DAYS = 14  # Keep last 14 days of hourly records to prevent repo bloat
+IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+TROY_OUNCE_GRAMS = 31.1034768
+EMAMI_COIN_PURE_GOLD_GRAMS = 8.133 * 0.900  # 7.3197g of 24K gold
 
 
 def main():
@@ -87,15 +91,15 @@ def get_gold_price(api_key=None):
 
 
 def parse_price(data, history=None):
-    ounce_usd = data["price"]
-    gram_24k_usd = data.get("price_gram_24k", ounce_usd / 31.1034768)
+    ounce_usd = float(data["price"])
+    gram_24k_usd = float(data.get("price_gram_24k", ounce_usd / TROY_OUNCE_GRAMS))
 
     if history is not None:
         change_percent = calculate_24h_change(ounce_usd, history)
     elif "chp" in data:
-        change_percent = data["chp"]
+        change_percent = float(data["chp"])
     elif "change_percent" in data:
-        change_percent = data["change_percent"]
+        change_percent = float(data["change_percent"])
     else:
         change_percent = 0.0
 
@@ -177,16 +181,14 @@ def calculate_24h_change(current_price_usd, history, current_timestamp=None):
         return 0.0
 
     target_ts = current_timestamp - 86400.0
-
     valid_records.sort(key=lambda x: x[0])
-    oldest_ts, oldest_price = valid_records[0]
+    oldest_ts, _ = valid_records[0]
 
     if (oldest_ts - target_ts) > 43200.0:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Info: Historical data is not old enough yet.")
         return 0.0
 
-    closest_ts, closest_price = min(valid_records, key=lambda x: abs(x[0] - target_ts))
-
+    _, closest_price = min(valid_records, key=lambda x: abs(x[0] - target_ts))
     if closest_price == 0:
         return 0.0
 
@@ -197,18 +199,37 @@ def calculate_24h_change(current_price_usd, history, current_timestamp=None):
 def record_price_history(current_price_usd, timestamp=None, filepath=HISTORY_FILE):
     history = load_price_history(filepath)
     if timestamp is None:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        timestamp_str = now_dt.isoformat()
+        cutoff_ts = (now_dt - timedelta(days=MAX_HISTORY_DAYS)).timestamp()
     elif isinstance(timestamp, datetime):
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
-        timestamp = timestamp.isoformat()
+        timestamp_str = timestamp.isoformat()
+        cutoff_ts = (timestamp - timedelta(days=MAX_HISTORY_DAYS)).timestamp()
+    else:
+        timestamp_str = str(timestamp)
+        try:
+            cutoff_ts = _parse_timestamp(timestamp_str) - (MAX_HISTORY_DAYS * 86400.0)
+        except Exception:
+            cutoff_ts = None
 
     history.append({
-        "timestamp": timestamp,
+        "timestamp": timestamp_str,
         "price_usd": current_price_usd,
     })
-    save_price_history(history, filepath)
 
+    if cutoff_ts is not None:
+        pruned = []
+        for rec in history:
+            try:
+                if _parse_timestamp(rec["timestamp"]) >= cutoff_ts:
+                    pruned.append(rec)
+            except Exception:
+                pruned.append(rec)
+        history = pruned
+
+    save_price_history(history, filepath)
 
 
 def get_iran_prices(api_key):
@@ -232,7 +253,7 @@ def parse_tether_price(data):
         if item.get("symbol") == "USDT_IRT":
             return {
                 "toman": item["price"],
-                "change_percent": item.get("change_percent", 0.0),
+                "change_percent": float(item.get("change_percent", 0.0)),
             }
     raise ValueError("USDT_IRT not found in brsapi.ir response")
 
@@ -242,7 +263,7 @@ def parse_gold_coin_price(data):
         if "امامی" in item.get("name", ""):
             return {
                 "toman": item["price"],
-                "change_percent": item.get("change_percent", 0.0),
+                "change_percent": float(item.get("change_percent", 0.0)),
             }
     return None
 
@@ -255,6 +276,20 @@ def calculate_18k_gold_toman(gram_24k_usd, tether_toman):
     gram_24k_toman = gram_24k_usd * tether_toman
     gram_18k_toman = gram_24k_toman * 0.75
     return gram_18k_toman
+
+
+def calculate_coin_bubble(gram_24k_usd, tether_toman, coin_market_toman):
+    """Calculate intrinsic value and bubble percentage of Emami gold coin."""
+    intrinsic_toman = gram_24k_usd * tether_toman * EMAMI_COIN_PURE_GOLD_GRAMS
+    if intrinsic_toman <= 0:
+        return {"intrinsic_toman": 0.0, "bubble_toman": 0.0, "bubble_percent": 0.0}
+    bubble_toman = coin_market_toman - intrinsic_toman
+    bubble_percent = (bubble_toman / intrinsic_toman) * 100.0
+    return {
+        "intrinsic_toman": round(intrinsic_toman),
+        "bubble_toman": round(bubble_toman),
+        "bubble_percent": round(bubble_percent, 2),
+    }
 
 
 def get_ai_commentary(
@@ -289,7 +324,7 @@ def get_ai_commentary(
             coin_change_val = coin_info.get("change_percent")
 
     try:
-        details = [f"قیمت انس طلای جهانی: {current_price_usd} دلار (تغییرات ۲۴ ساعته: {change_pct}%)"]
+        details = [f"قیمت انس طلای جهانی: {current_price_usd} دلار"]
 
         if toman_val is not None:
             t_change_str = f" با تغییرات {tether_change_val}%" if tether_change_val is not None else ""
@@ -309,15 +344,7 @@ def get_ai_commentary(
         )
 
         url = f"{GEMINI_API_URL}?key={api_key}"
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt}
-                    ]
-                }
-            ]
-        }
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -328,25 +355,26 @@ def get_ai_commentary(
 
 
 def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
-    arrow = "🔺" if price_info["change_percent"] >= 0 else "🔻"
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_iran = datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M")
 
     alerts = []
-    if is_significant_change(price_info["change_percent"]):
-        alerts.append("طلای جهانی")
+    ounce_change = price_info.get("change_percent", 0.0)
+    if is_significant_change(ounce_change):
+        alerts.append("انس جهانی")
     if tether_info is not None and is_significant_change(tether_info["change_percent"]):
         alerts.append("تتر")
     if coin_info is not None and is_significant_change(coin_info["change_percent"]):
         alerts.append("سکه امامی")
 
-    lines = ["<b>🥇 قیمت لحظهای طلای جهانی</b>"]
+    lines = ["<b>🥇 گزارش لحظه‌ای بازار طلا و ارز</b>"]
     if alerts:
-        lines.append(f"⚠️ نوسان قابلتوجه: {'، '.join(alerts)}")
+        lines.append(f"⚠️ نوسان قابل‌توجه: {'، '.join(alerts)}")
+
+    ounce_arrow = "🔺" if ounce_change >= 0 else "🔻"
     lines += [
         "",
-        f"هر اونس: {price_info['ounce_usd']:.2f} دلار",
-        f"هر گرم (۲۴ عیار): {price_info['gram_24k_usd']:.2f} دلار",
-        f"تغییر: {arrow} {abs(price_info['change_percent']):.2f}%",
+        f"🌎 هر اونس طلا: {price_info['ounce_usd']:.2f} دلار ({ounce_arrow} {abs(ounce_change):.2f}%)",
+        f"⚖️ هر گرم (۲۴ عیار): {price_info['gram_24k_usd']:.2f} دلار",
     ]
 
     if commentary:
@@ -360,7 +388,7 @@ def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
             f"💵 تتر (USDT): {tether_info['toman']:,} تومان",
             f"تغییر: {tether_arrow} {abs(tether_info['change_percent']):.2f}%",
             "",
-            f"🥇 طلای ۱۸ عیار: {gold_18k_toman:,.0f} تومان",
+            f"🥇 طلای ۱۸ عیار (محاسباتی): {gold_18k_toman:,.0f} تومان",
         ]
 
     if coin_info is not None:
@@ -370,8 +398,15 @@ def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
             f"🟡 سکه امامی: {coin_info['toman']:,} تومان",
             f"تغییر: {coin_arrow} {abs(coin_info['change_percent']):.2f}%",
         ]
+        if tether_info is not None:
+            bubble = calculate_coin_bubble(
+                price_info["gram_24k_usd"], tether_info["toman"], coin_info["toman"]
+            )
+            lines.append(
+                f"🫧 حباب سکه: {bubble['bubble_toman']:,} تومان ({bubble['bubble_percent']:+.1f}%)"
+            )
 
-    lines += ["", f"🕒 بروزرسانی: {now}"]
+    lines += ["", f"🕒 بروزرسانی (تهران): {now_iran}"]
     return "\n".join(lines)
 
 

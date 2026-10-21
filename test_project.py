@@ -6,6 +6,7 @@ from project import (
     build_telegram_payload,
     calculate_18k_gold_toman,
     calculate_24h_change,
+    calculate_coin_bubble,
     format_message,
     get_ai_commentary,
     is_significant_change,
@@ -16,7 +17,6 @@ from project import (
     record_price_history,
     save_price_history,
 )
-
 
 
 def test_parse_price_goldapi_io():
@@ -86,6 +86,14 @@ def test_calculate_18k_gold_toman():
     assert res == 4500000.0
 
 
+def test_calculate_coin_bubble():
+    # 100 USD/g * 60,000 Toman * 7.3197g pure gold = 43,918,200 Toman intrinsic
+    res = calculate_coin_bubble(100.0, 60000, 48310020)
+    assert res["intrinsic_toman"] == 43918200
+    assert res["bubble_toman"] == 4391820
+    assert res["bubble_percent"] == 10.0
+
+
 def test_format_message_full():
     price_info = {"ounce_usd": 2700.0, "gram_24k_usd": 86.8, "change_percent": 2.5}
     tether_info = {"toman": 60000, "change_percent": 0.5}
@@ -99,6 +107,7 @@ def test_format_message_full():
     assert "💡 بازار طلا صعودی است." in message
     assert "USDT" in message
     assert "سکه امامی" in message
+    assert "حباب سکه" in message
 
 
 def test_build_telegram_payload():
@@ -172,10 +181,7 @@ def test_record_price_history(tmp_path):
 
 
 def test_calculate_24h_change_empty_or_insufficient():
-    # Empty history
     assert calculate_24h_change(2600.0, []) == 0.0
-
-    # Insufficient history (< 12 hours)
     now_ts = 1750000000.0
     recent_history = [{"timestamp": now_ts - 7200, "price_usd": 2500.0}]
     assert calculate_24h_change(2600.0, recent_history, current_timestamp=now_ts) == 0.0
@@ -187,7 +193,6 @@ def test_calculate_24h_change_sufficient_history():
         {"timestamp": now_ts - 86400, "price_usd": 2500.0},
         {"timestamp": now_ts - 43200, "price_usd": 2550.0},
     ]
-    # Current price 2600, 24h ago was 2500 -> ((2600 - 2500)/2500)*100 = 4.0%
     change = calculate_24h_change(2600.0, target_history, current_timestamp=now_ts)
     assert change == 4.0
 
@@ -238,7 +243,4 @@ def test_get_ai_commentary_expanded_market_data(monkeypatch):
         assert "2700.0" in prompt_text
         assert "60,000" in prompt_text
         assert "45,000,000" in prompt_text
-        assert "تغییرات ۲۴ ساعته: 2.0%" in prompt_text
-
-
-
+        assert "تغییرات ۲۴ ساعته" not in prompt_text
