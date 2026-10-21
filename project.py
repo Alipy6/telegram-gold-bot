@@ -57,6 +57,9 @@ def main():
                 except Exception as e:
                     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Warning: Coin price unavailable: {e}")
 
+        if tether_info is None:
+            tether_info = get_fallback_tether_toman()
+            
         toman_price = tether_info["toman"] if tether_info else None
         commentary = get_ai_commentary(
             current_price_usd=price_info["ounce_usd"],
@@ -232,39 +235,58 @@ def record_price_history(current_price_usd, timestamp=None, filepath=HISTORY_FIL
     save_price_history(history, filepath)
 
 
-def get_iran_prices(api_key):
-    response = requests.get(
-        "https://Api.BrsApi.ir/Market/Gold_Currency.php",
-        params={"key": api_key},
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
-    return response.json()
+def get_fallback_tether_toman():
+    """Fallback to fetch live USDT/IRT in Toman if BrsApi returns 0 or fails."""
+    try:
+        # Nobitex public market stats API (returns Rials, convert to Toman by // 10)
+        resp = requests.get(
+            "https://api.nobitex.ir/market/stats",
+            params={"srcCurrency": "usdt", "dstCurrency": "rls"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        stats = resp.json().get("stats", {}).get("usdt-rls", {})
+        latest_rial = float(stats.get("latest", 0))
+        day_change = float(stats.get("dayChange", 0.0))
+        if latest_rial > 0:
+            return {
+                "toman": int(latest_rial // 10),
+                "change_percent": day_change,
+            }
+    except Exception:
+        pass
+    return None
 
 
 def parse_tether_price(data):
     for item in data.get("currency", []):
         if item.get("symbol") == "USDT_IRT":
-            return {
-                "toman": item["price"],
-                "change_percent": float(item.get("change_percent", 0.0)),
-            }
-    raise ValueError("USDT_IRT not found in brsapi.ir response")
+            price = float(item.get("price") or 0)
+            if price > 0:
+                return {
+                    "toman": int(price),
+                    "change_percent": float(item.get("change_percent") or 0.0),
+                }
+    # If not found or price == 0 in BrsApi, try fallback
+    fallback = get_fallback_tether_toman()
+    if fallback:
+        return fallback
+    raise ValueError("USDT_IRT not found or returned 0 in brsapi.ir response")
 
 
 def parse_gold_coin_price(data):
     for item in data.get("gold", []):
         if "امامی" in item.get("name", ""):
-            return {
-                "toman": item["price"],
-                "change_percent": float(item.get("change_percent", 0.0)),
-            }
+            price = float(item.get("price") or 0)
+            if price > 0:
+                return {
+                    "toman": int(price),
+                    "change_percent": float(item.get("change_percent") or 0.0),
+                }
+    # If not found or price == 0 in BrsApi, try fallback
+    fallback = get_fallback_gold_coin_price()
+    if fallback:
+        return fallback
     return None
 
 
