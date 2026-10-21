@@ -15,10 +15,18 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini
 
 SIGNIFICANT_CHANGE_THRESHOLD = 2.0
 HISTORY_FILE = os.path.join(BASE_DIR, "gold_price_history.json")
-MAX_HISTORY_DAYS = 14  # Keep last 14 days of hourly records to prevent repo bloat
+MAX_HISTORY_DAYS = 14
 IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 TROY_OUNCE_GRAMS = 31.1034768
 EMAMI_COIN_PURE_GOLD_GRAMS = 8.133 * 0.900  # 7.3197g of 24K gold
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
 
 
 def main():
@@ -59,7 +67,7 @@ def main():
 
         if tether_info is None:
             tether_info = get_fallback_tether_toman()
-            
+
         toman_price = tether_info["toman"] if tether_info else None
         commentary = get_ai_commentary(
             current_price_usd=price_info["ounce_usd"],
@@ -235,26 +243,60 @@ def record_price_history(current_price_usd, timestamp=None, filepath=HISTORY_FIL
     save_price_history(history, filepath)
 
 
+def get_iran_prices(api_key):
+    response = requests.get(
+        "https://Api.BrsApi.ir/Market/Gold_Currency.php",
+        params={"key": api_key},
+        headers=BROWSER_HEADERS,
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def get_fallback_tether_toman():
-    """Fallback to fetch live USDT/IRT in Toman if BrsApi returns 0 or fails."""
+    """Multi-source fallback for live USDT/IRT in Toman (TetherLand -> Wallex -> Nobitex)."""
+    # 1. TetherLand public API (returns Toman directly)
     try:
-        # Nobitex public market stats API (returns Rials, convert to Toman by // 10)
-        resp = requests.get(
-            "https://api.nobitex.ir/market/stats",
-            params={"srcCurrency": "usdt", "dstCurrency": "rls"},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        stats = resp.json().get("stats", {}).get("usdt-rls", {})
-        latest_rial = float(stats.get("latest", 0))
-        day_change = float(stats.get("dayChange", 0.0))
-        if latest_rial > 0:
-            return {
-                "toman": int(latest_rial // 10),
-                "change_percent": day_change,
-            }
+        r1 = requests.get("https://api.tetherland.com/currencies", headers=BROWSER_HEADERS, timeout=8)
+        if r1.ok:
+            usdt = r1.json().get("data", {}).get("currencies", {}).get("USDT", {})
+            price = float(usdt.get("price") or 0)
+            diff = float(usdt.get("diff24d") or 0.0)
+            if price > 1000:
+                return {"toman": int(price), "change_percent": diff}
     except Exception:
         pass
+
+    # 2. Wallex public markets API (returns Toman directly under USDTTMN)
+    try:
+        r2 = requests.get("https://api.wallex.ir/v1/markets", headers=BROWSER_HEADERS, timeout=8)
+        if r2.ok:
+            stats = r2.json().get("result", {}).get("symbols", {}).get("USDTTMN", {}).get("stats", {})
+            price = float(stats.get("lastPrice") or 0)
+            ch_24h = float(stats.get("24h_ch") or 0.0)
+            if price > 1000:
+                return {"toman": int(price), "change_percent": ch_24h}
+    except Exception:
+        pass
+
+    # 3. Nobitex public market stats API (returns Rials, convert to Toman by // 10)
+    try:
+        r3 = requests.get(
+            "https://api.nobitex.ir/market/stats",
+            params={"srcCurrency": "usdt", "dstCurrency": "rls"},
+            headers=BROWSER_HEADERS,
+            timeout=8,
+        )
+        if r3.ok:
+            stats = r3.json().get("stats", {}).get("usdt-rls", {})
+            latest_rial = float(stats.get("latest") or 0)
+            day_change = float(stats.get("dayChange") or 0.0)
+            if latest_rial > 10000:
+                return {"toman": int(latest_rial // 10), "change_percent": day_change}
+    except Exception:
+        pass
+
     return None
 
 
@@ -267,11 +309,10 @@ def parse_tether_price(data):
                     "toman": int(price),
                     "change_percent": float(item.get("change_percent") or 0.0),
                 }
-    # If not found or price == 0 in BrsApi, try fallback
     fallback = get_fallback_tether_toman()
     if fallback:
         return fallback
-    raise ValueError("USDT_IRT not found or returned 0 in brsapi.ir response")
+    raise ValueError("USDT_IRT not found in brsapi.ir response")
 
 
 def parse_gold_coin_price(data):
@@ -283,10 +324,6 @@ def parse_gold_coin_price(data):
                     "toman": int(price),
                     "change_percent": float(item.get("change_percent") or 0.0),
                 }
-    # If not found or price == 0 in BrsApi, try fallback
-    fallback = get_fallback_gold_coin_price()
-    if fallback:
-        return fallback
     return None
 
 
@@ -348,11 +385,11 @@ def get_ai_commentary(
     try:
         details = [f"قیمت انس طلای جهانی: {current_price_usd} دلار"]
 
-        if toman_val is not None:
+        if toman_val is not None and toman_val > 0:
             t_change_str = f" با تغییرات {tether_change_val}%" if tether_change_val is not None else ""
             details.append(f"نرخ تتر/تومان: {toman_val:,} تومان{t_change_str}")
 
-        if coin_val is not None:
+        if coin_val is not None and coin_val > 0:
             c_change_str = f" با تغییرات {coin_change_val}%" if coin_change_val is not None else ""
             details.append(f"قیمت سکه امامی: {coin_val:,} تومان{c_change_str}")
 
@@ -402,7 +439,7 @@ def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
     if commentary:
         lines += ["", f"💡 {commentary}"]
 
-    if tether_info is not None:
+    if tether_info is not None and tether_info.get("toman", 0) > 0:
         tether_arrow = "🔺" if tether_info["change_percent"] >= 0 else "🔻"
         gold_18k_toman = calculate_18k_gold_toman(price_info["gram_24k_usd"], tether_info["toman"])
         lines += [
@@ -413,14 +450,14 @@ def format_message(price_info, tether_info=None, coin_info=None, commentary=""):
             f"🥇 طلای ۱۸ عیار (محاسباتی): {gold_18k_toman:,.0f} تومان",
         ]
 
-    if coin_info is not None:
+    if coin_info is not None and coin_info.get("toman", 0) > 0:
         coin_arrow = "🔺" if coin_info["change_percent"] >= 0 else "🔻"
         lines += [
             "",
             f"🟡 سکه امامی: {coin_info['toman']:,} تومان",
             f"تغییر: {coin_arrow} {abs(coin_info['change_percent']):.2f}%",
         ]
-        if tether_info is not None:
+        if tether_info is not None and tether_info.get("toman", 0) > 0:
             bubble = calculate_coin_bubble(
                 price_info["gram_24k_usd"], tether_info["toman"], coin_info["toman"]
             )
