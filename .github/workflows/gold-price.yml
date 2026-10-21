@@ -2,8 +2,8 @@ name: Post gold price to Telegram
 
 on:
   schedule:
-    - cron: "0 * * * *"   # هر ساعت، سر ساعت
-  workflow_dispatch: {}       # اجازهی اجرای دستی از تب Actions، برای تست
+    - cron: "0 * * * *"   # Runs hourly on the hour
+  workflow_dispatch: {}   # Allows manual trigger from Actions tab
 
 jobs:
   post-price:
@@ -21,6 +21,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Run unit tests (Pytest)
+        run: pytest test_project.py -v
 
       - name: Run the bot
         env:
