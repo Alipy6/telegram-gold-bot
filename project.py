@@ -105,14 +105,23 @@ def parse_price(data, history=None):
     ounce_usd = float(data["price"])
     gram_24k_usd = float(data.get("price_gram_24k", ounce_usd / TROY_OUNCE_GRAMS))
 
+    change_percent = 0.0
     if history is not None:
         change_percent = calculate_24h_change(ounce_usd, history)
-    elif "chp" in data:
-        change_percent = float(data["chp"])
-    elif "change_percent" in data:
-        change_percent = float(data["change_percent"])
-    else:
-        change_percent = 0.0
+
+    if change_percent == 0.0:
+        if "chp" in data and data["chp"] is not None:
+            change_percent = float(data["chp"])
+        elif "change_percent" in data and data["change_percent"] is not None:
+            change_percent = float(data["change_percent"])
+        elif history and isinstance(history, list):
+            # Fallback to oldest available record in history if < 12h old
+            for rec in history:
+                if isinstance(rec, dict) and rec.get("price_usd"):
+                    oldest_price = float(rec["price_usd"])
+                    if oldest_price > 0 and oldest_price != ounce_usd:
+                        change_percent = round(((ounce_usd - oldest_price) / oldest_price) * 100.0, 2)
+                        break
 
     return {
         "ounce_usd": ounce_usd,
